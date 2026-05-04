@@ -1,5 +1,6 @@
 import { createServer } from "http";
 import { Server } from "socket.io";
+import mysql from "mysql2/promise";
 
 const PORT = process.env.PORT || 5000;
 const MONITOR_URL = process.env.LEGION_MONITOR_URL || 'https://legion-monitor.grudge.workers.dev';
@@ -34,6 +35,105 @@ process.on('unhandledRejection', (reason) => {
 
 const rooms = new Map();
 
+// ── MySQL connection pool ─────────────────────────────────────────────────────
+
+let db = null;
+
+if (process.env.MYSQL_URL) {
+  try {
+    db = mysql.createPool(process.env.MYSQL_URL);
+    console.log('[pvp] MySQL connection pool created');
+  } catch (err) {
+    console.error('[pvp] Failed to create MySQL pool:', err.message);
+    reportToLegion(err.message, err.stack, 'error');
+    db = null;
+  }
+} else {
+  console.warn('[pvp] MYSQL_URL not set — running without database persistence');
+}
+
+// ── Database schema initialisation ───────────────────────────────────────────
+
+async function initDb() {
+  if (!db) return;
+  try {
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS players (
+        id         INT          NOT NULL AUTO_INCREMENT,
+        socketId   VARCHAR(255) UNIQUE,
+        username   VARCHAR(255),
+        wins       INT          NOT NULL DEFAULT 0,
+        losses     INT          NOT NULL DEFAULT 0,
+        totalGames INT          NOT NULL DEFAULT 0,
+        createdAt  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updatedAt  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+    `);
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS games (
+        id          INT          NOT NULL AUTO_INCREMENT,
+        roomId      VARCHAR(10)  NOT NULL UNIQUE,
+        p1PlayerId  INT,
+        p2PlayerId  INT,
+        p1Character VARCHAR(255),
+        p2Character VARCHAR(255),
+        winner      VARCHAR(2),
+        gameMode    VARCHAR(50)  NOT NULL DEFAULT '1v1',
+        startedAt   TIMESTAMP,
+        endedAt     TIMESTAMP,
+        createdAt   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        FOREIGN KEY (p1PlayerId) REFERENCES players(id),
+        FOREIGN KEY (p2PlayerId) REFERENCES players(id)
+      )
+    `);
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS game_stats (
+        id        INT          NOT NULL AUTO_INCREMENT,
+        playerId  INT          NOT NULL,
+        gameId    INT          NOT NULL,
+        character VARCHAR(255) NOT NULL,
+        result    VARCHAR(10)  NOT NULL,
+        createdAt TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        FOREIGN KEY (playerId) REFERENCES players(id),
+        FOREIGN KEY (gameId)   REFERENCES games(id)
+      )
+    `);
+
+    console.log('[pvp] Database schema initialised');
+  } catch (err) {
+    console.error('[pvp] Failed to initialise database schema:', err.message);
+    reportToLegion(err.message, err.stack, 'error');
+  }
+}
+
+// ── DB helper: upsert / fetch player by socketId ─────────────────────────────
+
+async function getOrCreatePlayer(socketId) {
+  if (!db) return null;
+  try {
+    const [rows] = await db.execute(
+      'SELECT id FROM players WHERE socketId = ?',
+      [socketId]
+    );
+    if (rows.length > 0) return rows[0].id;
+
+    const [result] = await db.execute(
+      'INSERT INTO players (socketId, wins, losses, totalGames) VALUES (?, 0, 0, 0)',
+      [socketId]
+    );
+    return result.insertId;
+  } catch (err) {
+    console.error('[pvp] getOrCreatePlayer error:', err.message);
+    reportToLegion(err.message, err.stack, 'error');
+    return null;
+  }
+}
+
 // --- Helpers ---
 
 function generateCode() {
@@ -67,8 +167,11 @@ function removeRoom(roomId) {
 
 // --- HTTP server ---
 
-const httpServer = createServer((req, res) => {
-  if (req.url === "/health") {
+const httpServer = createServer(async (req, res) => {
+  const url = new URL(req.url, `http://localhost`);
+
+  // ── Health check ───────────────────────────────────────────────────────────
+  if (url.pathname === "/health") {
     const allRooms = [...rooms.values()];
     const waitingGames = allRooms.filter((r) => r.status === "waiting").length;
     const inProgressGames = allRooms.filter((r) => r.status === "in-progress").length;
@@ -79,15 +182,140 @@ const httpServer = createServer((req, res) => {
       JSON.stringify({
         status: "ok",
         uptime: process.uptime(),
-        lobby: {
-          waitingGames,
-          inProgressGames,
-          totalPlayers,
-        },
+        db: db ? "connected" : "unavailable",
+        lobby: { waitingGames, inProgressGames, totalPlayers },
       })
     );
     return;
   }
+
+  // ── GET /stats/:playerId ───────────────────────────────────────────────────
+  const statsMatch = url.pathname.match(/^\/stats\/(\d+)$/);
+  if (statsMatch) {
+    if (!db) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Database unavailable" }));
+      return;
+    }
+    try {
+      const [rows] = await db.execute(
+        'SELECT id, socketId, username, wins, losses, totalGames, createdAt FROM players WHERE id = ?',
+        [statsMatch[1]]
+      );
+      if (rows.length === 0) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Player not found" }));
+        return;
+      }
+      const p = rows[0];
+      const winRate = p.totalGames > 0 ? Math.round((p.wins / p.totalGames) * 100) : 0;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...p, winRate }));
+    } catch (err) {
+      console.error('[pvp] GET /stats error:', err.message);
+      reportToLegion(err.message, err.stack, 'error');
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal server error" }));
+    }
+    return;
+  }
+
+  // ── GET /games/:roomId ─────────────────────────────────────────────────────
+  const gamesMatch = url.pathname.match(/^\/games\/([A-Z0-9]+)$/i);
+  if (gamesMatch) {
+    if (!db) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Database unavailable" }));
+      return;
+    }
+    try {
+      const [rows] = await db.execute(
+        `SELECT g.*,
+                p1.socketId AS p1SocketId, p1.username AS p1Username,
+                p2.socketId AS p2SocketId, p2.username AS p2Username
+         FROM games g
+         LEFT JOIN players p1 ON g.p1PlayerId = p1.id
+         LEFT JOIN players p2 ON g.p2PlayerId = p2.id
+         WHERE g.roomId = ?`,
+        [gamesMatch[1].toUpperCase()]
+      );
+      if (rows.length === 0) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Game not found" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(rows[0]));
+    } catch (err) {
+      console.error('[pvp] GET /games error:', err.message);
+      reportToLegion(err.message, err.stack, 'error');
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal server error" }));
+    }
+    return;
+  }
+
+  // ── GET /leaderboard?limit=10 ──────────────────────────────────────────────
+  if (url.pathname === "/leaderboard") {
+    if (!db) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Database unavailable" }));
+      return;
+    }
+    try {
+      const limit = Math.min(parseInt(url.searchParams.get("limit") || "10", 10), 100);
+      const [rows] = await db.execute(
+        `SELECT id, socketId, username, wins, losses, totalGames,
+                CASE WHEN totalGames > 0 THEN ROUND(wins / totalGames * 100) ELSE 0 END AS winRate
+         FROM players
+         ORDER BY wins DESC
+         LIMIT ?`,
+        [limit]
+      );
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(rows));
+    } catch (err) {
+      console.error('[pvp] GET /leaderboard error:', err.message);
+      reportToLegion(err.message, err.stack, 'error');
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal server error" }));
+    }
+    return;
+  }
+
+  // ── GET /player/:socketId ──────────────────────────────────────────────────
+  const playerMatch = url.pathname.match(/^\/player\/(.+)$/);
+  if (playerMatch) {
+    if (!db) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Database unavailable" }));
+      return;
+    }
+    try {
+      const [rows] = await db.execute(
+        `SELECT id, socketId, username, wins, losses, totalGames,
+                CASE WHEN totalGames > 0 THEN ROUND(wins / totalGames * 100) ELSE 0 END AS winRate,
+                createdAt
+         FROM players WHERE socketId = ?`,
+        [playerMatch[1]]
+      );
+      if (rows.length === 0) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Player not found" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(rows[0]));
+    } catch (err) {
+      console.error('[pvp] GET /player error:', err.message);
+      reportToLegion(err.message, err.stack, 'error');
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal server error" }));
+    }
+    return;
+  }
+
+  // ── Default ────────────────────────────────────────────────────────────────
   res.writeHead(200, { "Content-Type": "text/html" });
   res.end(`<h1>Grudge PvP Server</h1><p>Rooms: ${rooms.size}</p><p><a href="/health">Health Check</a></p>`);
 });
@@ -109,8 +337,12 @@ setInterval(() => {
 
 // --- Socket.io events ---
 
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
   console.log(`[pvp] connected: ${socket.id}`);
+
+  // ── Track player session in DB ─────────────────────────────────────────────
+  const playerId = await getOrCreatePlayer(socket.id);
+  socket.data.playerId = playerId;
 
   // ── Lobby ──────────────────────────────────────────────────────────────────
 
@@ -123,7 +355,7 @@ io.on("connection", (socket) => {
   });
 
   /** Create a new game and broadcast it to the lobby. */
-  socket.on("lobby:create-game", (options = {}, cb) => {
+  socket.on("lobby:create-game", async (options = {}, cb) => {
     const roomId = generateCode();
     const room = {
       id: roomId,
@@ -138,6 +370,20 @@ io.on("connection", (socket) => {
     rooms.set(roomId, room);
     socket.join(roomId);
     console.log(`[pvp] room ${roomId} created by ${socket.id} (mode: ${room.gameMode})`);
+
+    // Persist game record
+    if (db) {
+      try {
+        const [result] = await db.execute(
+          'INSERT INTO games (roomId, p1PlayerId, gameMode, startedAt) VALUES (?, ?, ?, NOW())',
+          [roomId, socket.data.playerId ?? null, room.gameMode]
+        );
+        room.gameId = result.insertId;
+      } catch (err) {
+        console.error('[pvp] Failed to insert game record:', err.message);
+        reportToLegion(err.message, err.stack, 'error');
+      }
+    }
 
     // Notify all lobby clients about the new game
     io.emit("lobby:game-updated", roomSummary(room));
@@ -228,7 +474,7 @@ io.on("connection", (socket) => {
     if (opponent) io.to(opponent.socketId).emit("room:opponent-picked", { characterId: data.characterId });
   });
 
-  socket.on("room:ready", (data) => {
+  socket.on("room:ready", async (data) => {
     const room = rooms.get(data.roomId);
     if (!room) return;
     const player = room.players.find((p) => p.socketId === socket.id);
@@ -241,6 +487,31 @@ io.on("connection", (socket) => {
       const p2 = room.players.find((p) => p.slot === "p2");
       console.log(`[pvp] room ${data.roomId} starting: ${p1.characterId} vs ${p2.characterId}`);
 
+      // Update game record with p2 info and character selections
+      if (db && room.gameId) {
+        try {
+          const p2PlayerId = room.players.find((p) => p.slot === "p2")
+            ? await (async () => {
+                const [rows] = await db.execute(
+                  'SELECT id FROM players WHERE socketId = ?',
+                  [p2.socketId]
+                );
+                return rows[0]?.id ?? null;
+              })()
+            : null;
+
+          await db.execute(
+            `UPDATE games
+             SET p2PlayerId = ?, p1Character = ?, p2Character = ?, startedAt = NOW()
+             WHERE id = ?`,
+            [p2PlayerId, p1.characterId, p2.characterId, room.gameId]
+          );
+        } catch (err) {
+          console.error('[pvp] Failed to update game record on start:', err.message);
+          reportToLegion(err.message, err.stack, 'error');
+        }
+      }
+
       // Remove from lobby view
       io.emit("lobby:game-updated", roomSummary(room));
 
@@ -248,6 +519,65 @@ io.on("connection", (socket) => {
         p1Character: p1.characterId,
         p2Character: p2.characterId,
       });
+    }
+  });
+
+  /** Clients emit this when the fight concludes. data: { roomId, winner: 'p1'|'p2' } */
+  socket.on("fight:end", async (data) => {
+    const room = rooms.get(data.roomId);
+    if (!room || !data.winner) return;
+
+    const p1 = room.players.find((p) => p.slot === "p1");
+    const p2 = room.players.find((p) => p.slot === "p2");
+    console.log(`[pvp] room ${data.roomId} ended — winner: ${data.winner}`);
+
+    if (db && room.gameId && p1 && p2) {
+      try {
+        // Resolve player IDs
+        const [p1Rows] = await db.execute('SELECT id FROM players WHERE socketId = ?', [p1.socketId]);
+        const [p2Rows] = await db.execute('SELECT id FROM players WHERE socketId = ?', [p2.socketId]);
+        const p1DbId = p1Rows[0]?.id ?? null;
+        const p2DbId = p2Rows[0]?.id ?? null;
+
+        // Finalise game record
+        await db.execute(
+          'UPDATE games SET winner = ?, endedAt = NOW() WHERE id = ?',
+          [data.winner, room.gameId]
+        );
+
+        // Insert game_stats for both players
+        if (p1DbId) {
+          await db.execute(
+            'INSERT INTO game_stats (playerId, gameId, character, result) VALUES (?, ?, ?, ?)',
+            [p1DbId, room.gameId, p1.characterId ?? '', data.winner === 'p1' ? 'win' : 'loss']
+          );
+        }
+        if (p2DbId) {
+          await db.execute(
+            'INSERT INTO game_stats (playerId, gameId, character, result) VALUES (?, ?, ?, ?)',
+            [p2DbId, room.gameId, p2.characterId ?? '', data.winner === 'p2' ? 'win' : 'loss']
+          );
+        }
+
+        // Update player win/loss counts
+        if (p1DbId) {
+          const p1Win = data.winner === 'p1';
+          await db.execute(
+            `UPDATE players SET wins = wins + ?, losses = losses + ?, totalGames = totalGames + 1 WHERE id = ?`,
+            [p1Win ? 1 : 0, p1Win ? 0 : 1, p1DbId]
+          );
+        }
+        if (p2DbId) {
+          const p2Win = data.winner === 'p2';
+          await db.execute(
+            `UPDATE players SET wins = wins + ?, losses = losses + ?, totalGames = totalGames + 1 WHERE id = ?`,
+            [p2Win ? 1 : 0, p2Win ? 0 : 1, p2DbId]
+          );
+        }
+      } catch (err) {
+        console.error('[pvp] Failed to record fight:end:', err.message);
+        reportToLegion(err.message, err.stack, 'error');
+      }
     }
   });
 
@@ -274,6 +604,8 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(PORT, "0.0.0.0", () => {
+httpServer.listen(PORT, "0.0.0.0", async () => {
   console.log(`[pvp] Grudge PvP Server running on port ${PORT}`);
+  await initDb();
+  if (db) console.log('[pvp] Database ready');
 });
