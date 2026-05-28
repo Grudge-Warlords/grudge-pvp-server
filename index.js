@@ -111,7 +111,7 @@ async function initDb() {
   }
 }
 
-// ── DB helper: upsert / fetch player by socketId ─────────────────────────────
+// ── DB helper: upsert / fetch player by socketId ───────────────────────────────
 
 async function getOrCreatePlayer(socketId) {
   if (!db) return null;
@@ -190,7 +190,7 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // ── GET /stats/:playerId ───────────────────────────────────────────────────
-  const statsMatch = url.pathname.match(/^\/stats\/(\d+)$/);
+  const statsMatch = url.pathname.match(/^\\/stats\\/(\\d+)$/);
   if (statsMatch) {
     if (!db) {
       res.writeHead(503, { "Content-Type": "application/json" });
@@ -221,7 +221,7 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // ── GET /games/:roomId ─────────────────────────────────────────────────────
-  const gamesMatch = url.pathname.match(/^\/games\/([A-Z0-9]+)$/i);
+  const gamesMatch = url.pathname.match(/^\\/games\\/([A-Z0-9]+)$/i);
   if (gamesMatch) {
     if (!db) {
       res.writeHead(503, { "Content-Type": "application/json" });
@@ -284,7 +284,7 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // ── GET /player/:socketId ──────────────────────────────────────────────────
-  const playerMatch = url.pathname.match(/^\/player\/(.+)$/);
+  const playerMatch = url.pathname.match(/^\\/player\\/(.+)$/);
   if (playerMatch) {
     if (!db) {
       res.writeHead(503, { "Content-Type": "application/json" });
@@ -315,10 +315,413 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  // ── Default ────────────────────────────────────────────────────────────────
-  res.writeHead(200, { "Content-Type": "text/html" });
-  res.end(`<h1>Grudge PvP Server</h1><p>Rooms: ${rooms.size}</p><p><a href="/health">Health Check</a></p>`);
+  // ── Default: serve HTML dashboard ──────────────────────────────────────────
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(getHtmlDashboard());
 });
+
+function getHtmlDashboard() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grudge PvP Server</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+      padding: 30px 0;
+      border-bottom: 2px solid #e94560;
+    }
+
+    h1 {
+      font-size: 3em;
+      font-weight: 700;
+      background: linear-gradient(135deg, #e94560 0%, #ff6b9d 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+    }
+
+    .subtitle {
+      font-size: 1.1em;
+      color: #b0b0b0;
+      margin-bottom: 20px;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+
+    .stat-card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(233, 69, 96, 0.3);
+      border-radius: 12px;
+      padding: 25px;
+      backdrop-filter: blur(10px);
+      transition: all 0.3s ease;
+    }
+
+    .stat-card:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: #e94560;
+      transform: translateY(-5px);
+      box-shadow: 0 10px 30px rgba(233, 69, 96, 0.2);
+    }
+
+    .stat-label {
+      font-size: 0.9em;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+
+    .stat-value {
+      font-size: 2.5em;
+      font-weight: 700;
+      color: #e94560;
+    }
+
+    .section {
+      margin-bottom: 40px;
+    }
+
+    .section-title {
+      font-size: 1.8em;
+      font-weight: 600;
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #e94560;
+      color: #fff;
+    }
+
+    .button-group {
+      display: flex;
+      gap: 15px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    button {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 1em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #e94560 0%, #ff6b9d 100%);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(233, 69, 96, 0.4);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: #e0e0e0;
+      border: 1px solid rgba(233, 69, 96, 0.3);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: #e94560;
+    }
+
+    .room-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 20px;
+    }
+
+    .room-card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(233, 69, 96, 0.3);
+      border-radius: 12px;
+      padding: 20px;
+      backdrop-filter: blur(10px);
+      transition: all 0.3s ease;
+    }
+
+    .room-card:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: #e94560;
+      transform: translateY(-5px);
+      box-shadow: 0 10px 30px rgba(233, 69, 96, 0.2);
+    }
+
+    .room-id {
+      font-size: 1.5em;
+      font-weight: 700;
+      color: #e94560;
+      margin-bottom: 10px;
+      font-family: 'Courier New', monospace;
+    }
+
+    .room-info {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 15px;
+      font-size: 0.95em;
+    }
+
+    .room-status {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.85em;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .status-waiting {
+      background: rgba(76, 175, 80, 0.2);
+      color: #4caf50;
+    }
+
+    .status-in-progress {
+      background: rgba(255, 193, 7, 0.2);
+      color: #ffc107;
+    }
+
+    .status-finished {
+      background: rgba(244, 67, 54, 0.2);
+      color: #f44336;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #888;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 40px;
+      height: 40px;
+      border: 4px solid rgba(233, 69, 96, 0.2);
+      border-top-color: #e94560;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error {
+      background: rgba(244, 67, 54, 0.1);
+      border: 1px solid #f44336;
+      color: #ff9999;
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    .success {
+      background: rgba(76, 175, 80, 0.1);
+      border: 1px solid #4caf50;
+      color: #99ff99;
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    footer {
+      text-align: center;
+      padding: 30px 0;
+      border-top: 1px solid rgba(233, 69, 96, 0.2);
+      color: #666;
+      margin-top: 60px;
+    }
+
+    .api-docs {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(233, 69, 96, 0.3);
+      border-radius: 12px;
+      padding: 20px;
+      margin-top: 20px;
+    }
+
+    .api-endpoint {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 12px;
+      border-radius: 6px;
+      margin: 10px 0;
+      font-family: 'Courier New', monospace;
+      font-size: 0.9em;
+      color: #4caf50;
+    }
+
+    @media (max-width: 768px) {
+      h1 {
+        font-size: 2em;
+      }
+
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .room-list {
+        grid-template-columns: 1fr;
+      }
+
+      .button-group {
+        flex-direction: column;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>⚔️ Grudge PvP</h1>
+      <p class="subtitle">Real-time multiplayer battle arena</p>
+    </header>
+
+    <div class="stats-grid" id="stats">
+      <div class="stat-card">
+        <div class="stat-label">Active Games</div>
+        <div class="stat-value" id="activeGames">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Waiting Rooms</div>
+        <div class="stat-value" id="waitingRooms">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Players</div>
+        <div class="stat-value" id="totalPlayers">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Server Status</div>
+        <div class="stat-value" id="serverStatus" style="color: #4caf50;">✓ Online</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Quick Actions</h2>
+      <div class="button-group">
+        <button class="btn-primary" onclick="refreshStats()">🔄 Refresh Stats</button>
+        <button class="btn-secondary" onclick="viewLeaderboard()">🏆 View Leaderboard</button>
+        <button class="btn-secondary" onclick="viewDocs()">📖 API Docs</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">API Documentation</h2>
+      <div class="api-docs">
+        <p style="margin-bottom: 15px;">The Grudge PvP Server provides WebSocket and REST APIs for game management.</p>
+        
+        <h3 style="margin-top: 20px; margin-bottom: 10px; color: #e94560;">REST Endpoints</h3>
+        <div class="api-endpoint">GET /health</div>
+        <p style="margin-bottom: 15px; color: #aaa;">Check server health and current game statistics</p>
+
+        <div class="api-endpoint">GET /leaderboard?limit=10</div>
+        <p style="margin-bottom: 15px; color: #aaa;">Fetch top players by wins (limit: 1-100)</p>
+
+        <div class="api-endpoint">GET /stats/:playerId</div>
+        <p style="margin-bottom: 15px; color: #aaa;">Get player statistics by ID</p>
+
+        <div class="api-endpoint">GET /player/:socketId</div>
+        <p style="margin-bottom: 15px; color: #aaa;">Get player info by socket ID</p>
+
+        <div class="api-endpoint">GET /games/:roomId</div>
+        <p style="margin-bottom: 15px; color: #aaa;">Get game details by room ID</p>
+
+        <h3 style="margin-top: 20px; margin-bottom: 10px; color: #e94560;">WebSocket Events</h3>
+        <p style="color: #aaa; margin-bottom: 10px;"><strong>Lobby Events:</strong></p>
+        <div class="api-endpoint">lobby:list</div>
+        <div class="api-endpoint">lobby:create-game</div>
+        <div class="api-endpoint">lobby:join-game</div>
+
+        <p style="color: #aaa; margin-bottom: 10px; margin-top: 15px;"><strong>Room Events:</strong></p>
+        <div class="api-endpoint">room:pick</div>
+        <div class="api-endpoint">room:ready</div>
+        <div class="api-endpoint">fight:start</div>
+        <div class="api-endpoint">fight:end</div>
+
+        <p style="color: #aaa; margin-top: 15px; font-size: 0.9em;">
+          WebSocket path: <code>/pvp</code> | CORS enabled for all origins
+        </p>
+      </div>
+    </div>
+
+    <footer>
+      <p>Grudge PvP Server v1.0 | <a href="/health" style="color: #e94560; text-decoration: none;">Health Check</a></p>
+    </footer>
+  </div>
+
+  <script>
+    async function refreshStats() {
+      try {
+        const response = await fetch('/health');
+        const data = await response.json();
+        
+        document.getElementById('activeGames').textContent = data.lobby.inProgressGames;
+        document.getElementById('waitingRooms').textContent = data.lobby.waitingGames;
+        document.getElementById('totalPlayers').textContent = data.lobby.totalPlayers;
+        document.getElementById('serverStatus').textContent = data.db === 'connected' ? '✓ Online' : '⚠ Limited';
+        document.getElementById('serverStatus').style.color = data.db === 'connected' ? '#4caf50' : '#ffc107';
+      } catch (err) {
+        console.error('Failed to fetch stats:', err);
+        document.getElementById('serverStatus').textContent = '✗ Offline';
+        document.getElementById('serverStatus').style.color = '#f44336';
+      }
+    }
+
+    function viewLeaderboard() {
+      alert('Leaderboard feature coming soon! Use GET /leaderboard API endpoint.');
+    }
+
+    function viewDocs() {
+      alert('API documentation is displayed above. Use the REST endpoints or WebSocket connection to /pvp');
+    }
+
+    // Auto-refresh stats every 5 seconds
+    refreshStats();
+    setInterval(refreshStats, 5000);
+  </script>
+</body>
+</html>`;
+}
 
 const io = new Server(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
@@ -609,3 +1012,4 @@ httpServer.listen(PORT, "0.0.0.0", async () => {
   await initDb();
   if (db) console.log('[pvp] Database ready');
 });
+
