@@ -39,9 +39,15 @@ const rooms = new Map();
 
 let db = null;
 
-if (process.env.MYSQL_URL) {
+if (process.env.MYSQL_URL || process.env.MYSQL_PUBLIC_URL || process.env.DATABASE_URL) {
   try {
-    db = mysql.createPool(process.env.MYSQL_URL);
+    db = mysql.createPool({
+      uri: process.env.MYSQL_URL || process.env.MYSQL_PUBLIC_URL || process.env.DATABASE_URL,
+      waitForConnections: true,
+      connectionLimit: 4,
+      connectTimeout: 4000,
+      enableKeepAlive: true,
+    });
     console.log('[pvp] MySQL connection pool created');
   } catch (err) {
     console.error('[pvp] Failed to create MySQL pool:', err.message);
@@ -50,6 +56,41 @@ if (process.env.MYSQL_URL) {
   }
 } else {
   console.warn('[pvp] MYSQL_URL not set — running without database persistence');
+}
+
+const ALLOWED_ORIGINS = [
+  "https://grudgewarlords.com",
+  "https://www.grudgewarlords.com",
+  "https://client.grudge-studio.com",
+  "https://grudge-studio.com",
+  "https://www.grudge-studio.com",
+];
+
+function originAllowed(origin) {
+  if (!origin) return false;
+  try {
+    const h = new URL(origin).hostname.toLowerCase();
+    return (
+      ALLOWED_ORIGINS.includes(origin) ||
+      h.endsWith(".grudgewarlords.com") ||
+      h.endsWith(".grudge-studio.com") ||
+      h.endsWith(".vercel.app") ||
+      h === "localhost" ||
+      h === "127.0.0.1"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function applyCors(req, res) {
+  const origin = req.headers.origin || "";
+  if (originAllowed(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 // ── Database schema initialisation ───────────────────────────────────────────
@@ -169,9 +210,15 @@ function removeRoom(roomId) {
 
 const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost`);
+  applyCors(req, res);
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
   // ── Health check ───────────────────────────────────────────────────────────
-  if (url.pathname === "/health") {
+  if (url.pathname === "/health" || url.pathname === "/api/health" || url.pathname === "/status") {
     const allRooms = [...rooms.values()];
     const waitingGames = allRooms.filter((r) => r.status === "waiting").length;
     const inProgressGames = allRooms.filter((r) => r.status === "in-progress").length;
@@ -181,11 +228,21 @@ const httpServer = createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         status: "ok",
+        service: "grudge-pvp-server",
         uptime: process.uptime(),
         db: db ? "connected" : "unavailable",
         lobby: { waitingGames, inProgressGames, totalPlayers },
       })
     );
+    return;
+  }
+
+  if (url.pathname === "/lobby" || url.pathname === "/api/lobby") {
+    const waiting = [...rooms.values()]
+      .filter((r) => r.status === "waiting")
+      .map(roomSummary);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, games: waiting, count: waiting.length }));
     return;
   }
 
@@ -321,7 +378,13 @@ const httpServer = createServer(async (req, res) => {
 });
 
 const io = new Server(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: (origin, cb) => {
+      if (!origin || originAllowed(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+    methods: ["GET", "POST"],
+  },
   path: "/pvp",
 });
 
@@ -604,8 +667,12 @@ io.on("connection", async (socket) => {
   });
 });
 
-httpServer.listen(PORT, "0.0.0.0", async () => {
+httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[pvp] Grudge PvP Server running on port ${PORT}`);
-  await initDb();
+  // Never block listen on MySQL — failed deploys were hanging schema init.
+  void initDb().catch((err) => {
+    console.error("[pvp] initDb failed (server stays up):", err.message);
+    reportToLegion(err.message, err.stack, "error");
+  });
   if (db) console.log('[pvp] Database ready');
 });
