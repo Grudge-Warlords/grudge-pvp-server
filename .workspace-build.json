@@ -1,0 +1,41 @@
+{
+  "id": "grudgegit/grudge-pvp-server",
+  "repository": "Grudge-Warlords/grudge-pvp-server",
+  "group": "grudgegit",
+  "name": "grudge-pvp-server",
+  "source": "C:\\grudgegit\\grudge-pvp-server",
+  "buildRoot": "D:\\grudgegit\\grudge-pvp-server",
+  "outputRoot": "E:\\grudgegit\\grudge-pvp-server",
+  "components": [
+    {
+      "id": "server",
+      "label": "server",
+      "relative": ".",
+      "output": "server",
+      "kind": "node",
+      "buildScript": null,
+      "launchScript": "start",
+      "installer": false,
+      "requires": [
+        "Node.js and project package manager"
+      ],
+      "notes": [],
+      "launchOptionOnBuildCompletion": true
+    }
+  ],
+  "packages": {
+    ".": {
+      "scripts": {
+        "start": "node index.js",
+        "dev": "node --watch index.js"
+      },
+      "packageManager": null,
+      "name": "grudge-pvp-server"
+    }
+  },
+  "nativeEntries": [],
+  "preexistingTrackedChanges": [],
+  "releaseOnly": false,
+  "storageProfile": ".storage/profile.json",
+  "storageDevice": ".storage/device.json"
+}

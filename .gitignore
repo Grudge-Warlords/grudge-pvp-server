@@ -1,1 +1,3 @@
 node_modules
+# This device only; public installers collect their own drive choices.
+.storage/device.json
